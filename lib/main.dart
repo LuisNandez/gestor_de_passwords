@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -11,24 +12,6 @@ import 'package:excel/excel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/foundation.dart';
-
-
-// --- PASO 1: AGREGA ESTAS DEPENDENCIAS A TU pubspec.yaml ---
-//
-// dependencies:
-//   flutter:
-//     sdk: flutter
-//   path_provider: ^2.0.11
-//   encrypt: ^5.0.1
-//   file_picker: ^5.2.5
-//   csv: ^5.0.1
-//   excel: ^2.1.0
-//   # NUEVAS DEPENDENCIAS:
-//   shared_preferences: ^2.0.15
-//   provider: ^6.0.4
-//
-// Después de agregarlas, ejecuta "flutter pub get" en tu terminal.
-// -----------------------------------------------------------
 
 // --- GESTOR DE TEMA ---
 class ThemeNotifier with ChangeNotifier {
@@ -251,27 +234,81 @@ class StorageService {
 }
 
 class ImportExportService {
-  Future<String?> exportToCSV(List<Credencial> credentials) async {
-    List<List<dynamic>> rows = [];
-    rows.add(['nombre', 'email', 'usuario', 'contrasena', 'numeroTelefono', 'notas']);
-    for (var cred in credentials) {
-      rows.add([cred.nombre, cred.email, cred.usuario, cred.contrasena, cred.numeroTelefono, cred.notas]);
-    }
-    String csv = const ListToCsvConverter().convert(rows);
-    String? outputFile = await FilePicker.platform.saveFile(
-      dialogTitle: 'Guardar archivo CSV',
-      fileName: 'mis_credenciales.csv',
-      type: FileType.custom,
-      allowedExtensions: ['csv'],
+  // Función para exportar a Excel con formato bonito
+  Future<String?> exportToExcel(List<Credencial> credentials) async {
+    var excel = Excel.createExcel();
+    
+    String sheetName = 'Mis Credenciales';
+    Sheet sheet = excel[sheetName];
+    excel.delete('Sheet1'); 
+
+    // CORRECCIÓN 1: Usar ExcelColor.fromHexString en lugar de Strings simples
+    CellStyle headerStyle = CellStyle(
+      backgroundColorHex: ExcelColor.fromHexString('#0000FF'), // Azul
+      fontFamily: getFontFamily(FontFamily.Calibri),
+      fontColorHex: ExcelColor.fromHexString('#FFFFFF'),       // Blanco
+      bold: true,
+      horizontalAlign: HorizontalAlign.Center,
+      verticalAlign: VerticalAlign.Center,
     );
-    if (outputFile != null) {
-      final file = File(outputFile);
-      await file.writeAsString(csv);
-      return outputFile;
+
+    // Encabezados
+    List<String> headers = ['Nombre', 'Email', 'Usuario', 'Contraseña', 'Teléfono', 'Notas'];
+    
+    for (var i = 0; i < headers.length; i++) {
+      var cell = sheet.cell(CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0));
+      cell.value = TextCellValue(headers[i]); 
+      cell.cellStyle = headerStyle;
+    }
+
+    // Datos
+    for (var i = 0; i < credentials.length; i++) {
+      var cred = credentials[i];
+      int rowIndex = i + 1;
+
+      _addCell(sheet, 0, rowIndex, cred.nombre);
+      _addCell(sheet, 1, rowIndex, cred.email);
+      _addCell(sheet, 2, rowIndex, cred.usuario);
+      _addCell(sheet, 3, rowIndex, cred.contrasena);
+      _addCell(sheet, 4, rowIndex, cred.numeroTelefono);
+      _addCell(sheet, 5, rowIndex, cred.notas);
+    }
+
+    // CORRECCIÓN 2: setColWidth -> setColumnWidth
+    sheet.setColumnWidth(0, 25.0);
+    sheet.setColumnWidth(1, 30.0);
+    sheet.setColumnWidth(2, 20.0);
+    sheet.setColumnWidth(3, 20.0);
+    sheet.setColumnWidth(4, 20.0);
+    sheet.setColumnWidth(5, 40.0);
+
+    var fileBytes = excel.save();
+
+    if (fileBytes != null) {
+      String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Guardar archivo Excel',
+        fileName: 'mis_credenciales.xlsx',
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+      );
+
+      if (outputFile != null) {
+        final file = File(outputFile);
+        await file.writeAsBytes(fileBytes);
+        return outputFile;
+      }
     }
     return null;
   }
 
+  void _addCell(Sheet sheet, int col, int row, String value) {
+    var cell = sheet.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: row));
+    cell.value = TextCellValue(value); // Clase nativa de excel v4
+    // cell.cellStyle = CellStyle(textWrapping: TextWrapping.WrapText);
+  }
+  // Helper para añadir celdas de forma segura
+
+  // --- IMPORTACIÓN (Se mantiene compatible con CSV y XLSX) ---
   Future<List<Credencial>> importFromFile() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -281,18 +318,33 @@ class ImportExportService {
     if (result != null && result.files.single.path != null) {
       final path = result.files.single.path!;
       List<List<dynamic>> rows;
-      if (path.endsWith('.csv')) {
-        final content = await File(path).readAsString();
-        rows = const CsvToListConverter(shouldParseNumbers: false).convert(content);
-      } else if (path.endsWith('.xlsx')) {
-        var bytes = File(path).readAsBytesSync();
-        var excel = Excel.decodeBytes(bytes);
-        var sheet = excel.tables.keys.first;
-        rows = excel.tables[sheet]!.rows;
-      } else {
-        return [];
+      
+      try {
+        if (path.endsWith('.csv')) {
+          final content = await File(path).readAsString();
+          rows = const CsvToListConverter(shouldParseNumbers: false).convert(content);
+        } else if (path.endsWith('.xlsx')) {
+          var bytes = File(path).readAsBytesSync();
+          var excel = Excel.decodeBytes(bytes);
+          // Tomamos la primera hoja disponible
+          var sheetName = excel.tables.keys.first;
+          var table = excel.tables[sheetName];
+          
+          if (table == null) return [];
+
+          rows = [];
+          // Convertimos las filas de Excel a lista de listas para procesarlas igual que el CSV
+          for (var row in table.rows) {
+            rows.add(row.map((e) => e?.value?.toString() ?? '').toList());
+          }
+        } else {
+          return [];
+        }
+        return _processRows(rows);
+      } catch (e) {
+        print("Error importando: $e");
+        rethrow;
       }
-      return _processRows(rows);
     }
     return [];
   }
@@ -301,9 +353,6 @@ class ImportExportService {
     if (rows.isEmpty) return [];
     
     String getCellValue(dynamic cell) {
-        if (cell is Data) {
-            return cell.value?.toString() ?? '';
-        }
         return cell?.toString() ?? '';
     }
 
@@ -313,9 +362,9 @@ class ImportExportService {
     const headerAliases = {
       'nombre': ['nombre', 'name', 'sitio', 'website'],
       'email': ['email', 'correo'],
-      'usuario': ['usuario', 'user', 'username', 'username'],
-      'contrasena': ['contraseña', 'password', 'clave'],
-      'numeroTelefono': ['telefono', 'teléfono', 'phone', 'numero', 'número de teléfono'],
+      'usuario': ['usuario', 'user', 'username'],
+      'contrasena': ['contraseña', 'password', 'clave', 'contrasena'],
+      'numeroTelefono': ['telefono', 'teléfono', 'phone', 'numero'],
       'notas': ['notas', 'notes', 'nota'],
     };
 
@@ -329,13 +378,27 @@ class ImportExportService {
     }
 
     if (!columnMap.containsKey('nombre')) {
-      throw Exception("No se encontró una columna para 'Nombre' en el archivo.");
+      // Si no encuentra columnas exactas, intentamos asumir el orden estándar si es un archivo creado por nosotros
+      if (headers.isNotEmpty && headers[0].contains('nombre')) {
+         // Parece correcto, seguimos
+      } else {
+         // Fallback simple: si no hay headers claros, asumimos orden por índice (peligroso pero útil)
+         columnMap['nombre'] = 0;
+         columnMap['email'] = 1;
+         columnMap['usuario'] = 2;
+         columnMap['contrasena'] = 3;
+         columnMap['numeroTelefono'] = 4;
+         columnMap['notas'] = 5;
+      }
     }
 
     List<Credencial> importedCredentials = [];
+    // Empezamos en 1 para saltar el header
     for (int i = 1; i < rows.length; i++) {
       var row = rows[i];
-      
+      // Protección por si hay filas vacías al final
+      if (row.every((element) => element.toString().trim().isEmpty)) continue;
+
       String getValue(String key) {
         if (columnMap.containsKey(key) && columnMap[key]! < row.length) {
           return getCellValue(row[columnMap[key]!]);
@@ -699,14 +762,16 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     try {
-      final path = await _importExport.exportToCSV(_credentials);
+      // CAMBIO: Ahora llamamos a exportToExcel
+      final path = await _importExport.exportToExcel(_credentials);
+      
       if (path != null) {
-        _showSnackbar('Credenciales exportadas con éxito a $path');
+        _showSnackbar('Credenciales exportadas a Excel en: $path');
       } else {
         _showSnackbar('Exportación cancelada.');
       }
     } catch (e) {
-      _showSnackbar('Error al exportar el archivo: $e', isError: true);
+      _showSnackbar('Error al exportar: $e', isError: true);
     }
   }
 
@@ -896,16 +961,29 @@ class _HomeScreenState extends State<HomeScreen> {
           itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
             const PopupMenuItem<String>(
               value: 'import',
-              child: ListTile(leading: Icon(Icons.upload_file), title: Text('Importar archivo')),
+              child: ListTile(
+                leading: Icon(Icons.upload_file), 
+                title: Text('Importar archivo'),
+                contentPadding: EdgeInsets.zero
+              ),
             ),
             const PopupMenuItem<String>(
               value: 'export',
-              child: ListTile(leading: Icon(Icons.download), title: Text('Exportar a CSV')),
+              child: ListTile(
+                // CAMBIO AQUÍ: Icono de tabla y texto Excel
+                leading: Icon(Icons.table_view, color: Colors.green), 
+                title: Text('Exportar a Excel (.xlsx)'),
+                contentPadding: EdgeInsets.zero
+              ),
             ),
             const PopupMenuDivider(),
             const PopupMenuItem<String>(
               value: 'settings',
-              child: ListTile(leading: Icon(Icons.settings), title: Text('Ajustes')),
+              child: ListTile(
+                leading: Icon(Icons.settings), 
+                title: Text('Ajustes'),
+                contentPadding: EdgeInsets.zero
+              ),
             ),
           ],
         ),
